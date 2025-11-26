@@ -153,8 +153,8 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
 
     # Stripe transfers – journal vs membership (cutoff = $9)
     if "stripe transfer" in desc and amount > 0:
-        if abs(amount) < 9:  # < $9 → Category 9, >= $9 → Category 2
-            return CATEGORY_LABELS["9"], False, False
+        if abs(amount) < 9:  # < $9 → Category 9 (journal-type exempt receipts)
+            return CATEGORY_LABELS["9"], False, False  # we'll also auto-label later
         else:
             return CATEGORY_LABELS["2"], False, False
 
@@ -186,7 +186,6 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
         return CATEGORY_LABELS["22"], False, False
 
     # SaaS / tech subscriptions that are NOT in the explicit professional-fee list above
-    # (e.g., ConvertKit, Squarespace clones, generic hosting if added later)
     if any(x in desc for x in [
         "convertkit", "kit.com",
         "networksolutio", "network solutions",
@@ -307,6 +306,28 @@ df[["IRS Category", "Needs Review", "Potential Sponsorship"]] = result
 # Drop ignored rows (balances, internal savings transfers, etc.)
 df = df[df["IRS Category"] != "IGNORE"]
 
+# -----------------------------
+# STRIPE < $9 → JOURNAL SUBSCRIPTIONS (AUTO)
+# -----------------------------
+amount_series = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+journal_mask = (
+    df["Description"].str.lower().str.contains("stripe transfer", na=False)
+    & (amount_series > 0)
+    & (amount_series.abs() < 9)
+)
+
+# Ensure they are Category 9 (journal-type exempt receipts)
+df.loc[journal_mask, "IRS Category"] = CATEGORY_LABELS["9"]
+
+# Auto-set itemization label if not already set
+df.loc[journal_mask & (df["Itemization Label"] == ""), "Itemization Label"] = "Journal subscriptions"
+
+# -----------------------------
+# CONTINUE PIPELINE
+# -----------------------------
+st.subheader("Categorized transactions (initial pass)")
+st.dataframe(df.head(50))
+
 # Force review for categories that require itemization:
 # 7 (Other revenue), 9 (Gross receipts from exempt purpose),
 # 15 (Contributions paid out), 16 (Disbursements to/for members), 23 (Other expenses)
@@ -314,8 +335,8 @@ df["Needs Review"] = df["Needs Review"] | df["IRS Category"].str.startswith(
     ("7 ", "9 ", "15 ", "16 ", "23 ")
 )
 
-st.subheader("Categorized transactions (initial pass)")
-st.dataframe(df.head(50))
+# But Stripe 'journal subscription' transfers under $9 are handled automatically
+df.loc[journal_mask, "Needs Review"] = False
 
 # -----------------------------
 # MANUAL RECONCILIATION SECTION
