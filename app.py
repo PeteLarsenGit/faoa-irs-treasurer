@@ -171,11 +171,24 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
     # EXPENSE RULES
     # -----------------
 
-    # SaaS / tech subscriptions (WildApricot, Squarespace, etc.) that are NOT professional services
+    # Professional fees – contractors, SaaS we treat as professional, legal, accounting, etc.
     if any(x in desc for x in [
+        "cooley", "legal", "attorney", "law firm",
+        "cpa", "accounting", "bookkeeping",
+        "consulting fee", "upwork",
+        "airtable.com", "airtable",
+        "g suite", "gsuite", "google workspace", "google*gsuite",
         "wild apricot", "wildapricot",
-        "convertkit", "kit.com",
         "squarespace",
+        "authnet gateway",
+        "affinipay", "affinipayllc",
+    ]):
+        return CATEGORY_LABELS["22"], False, False
+
+    # SaaS / tech subscriptions that are NOT in the explicit professional-fee list above
+    # (e.g., ConvertKit, Squarespace clones, generic hosting if added later)
+    if any(x in desc for x in [
+        "convertkit", "kit.com",
         "networksolutio", "network solutions",
         "apple.com"
     ]):
@@ -193,19 +206,9 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
     ]):
         return CATEGORY_LABELS["16"], True, False  # Needs Review for 16
 
-    # Professional fees – contractors, Upwork, legal, accounting, G Suite, Airtable
+    # Payment processor / merchant fees (non-Affinipay/Authnet, which we treated as 22 above)
     if any(x in desc for x in [
-        "cooley", "legal", "attorney", "law firm",
-        "cpa", "accounting", "bookkeeping",
-        "consulting fee", "upwork",
-        "airtable.com", "airtable",
-        "g suite", "gsuite", "google workspace", "google*gsuite"
-    ]):
-        return CATEGORY_LABELS["22"], False, False
-
-    # Payment processor / merchant fees
-    if any(x in desc for x in [
-        "authnet gateway", "bkcrd fees", "merchant fee",
+        "bkcrd fees", "merchant fee",
         "cardconnect", "processing fee"
     ]):
         return CATEGORY_LABELS["23"], False, False
@@ -315,15 +318,15 @@ st.subheader("Categorized transactions (initial pass)")
 st.dataframe(df.head(50))
 
 # -----------------------------
-# MANUAL REVIEW FOR UNCLASSIFIED / MEMBER / SPONSOR / ITEMIZED CATEGORIES
+# MANUAL RECONCILIATION SECTION
 # -----------------------------
 review_df = df[df["Needs Review"]]
 
 if not review_df.empty:
-    st.subheader("Transactions requiring manual classification")
+    st.subheader("Manual Reconciliation")
 
     st.markdown("""
-The rows below **must** be reviewed:
+The rows below **must** be reviewed and reconciled:
 
 - **Category 7 – OTHER REVENUE:**  
   Use **Itemization Label** to group similar types (e.g., `Journal ads`, `Journal subscriptions`, `Misc reimbursements`).  
@@ -351,12 +354,33 @@ The rows below **must** be reviewed:
   - Enter the **Sponsor Name** (e.g., `Boeing`, `Lockheed Martin`) so we can send tax documentation later.
 
 **How to edit:**  
-Click once in the **IRS Category** cell to reveal the dropdown, then choose the correct category.  
-Use the check box for **Needs Further Investigation** when appropriate.  
-Fill in the text fields where applicable.
+- Click once in the **IRS Category** cell to reveal the dropdown, then choose the correct category.  
+- The columns are ordered as: Date, Description, Amount, IRS Category, Needs Further Investigation, …  
+- Use the check box for **Needs Further Investigation** when appropriate.  
+- Fill in the text fields where applicable.
 """)
 
     cat_options = list(CATEGORY_LABELS.values())
+
+    # Reorder columns so IRS Category is 5th and Needs Further Investigation is 6th
+    desired_order = [
+        "Date",
+        "Description",
+        "Amount",
+        "IRS Category",
+        "Needs Further Investigation",
+        "Member/Event Label",
+        "Event Location",
+        "Event Purpose",
+        "Sponsor Name",
+        "Itemization Label",
+        "Potential Sponsorship",
+    ]
+    existing_cols = list(review_df.columns)
+    ordered_cols = [c for c in desired_order if c in existing_cols] + [
+        c for c in existing_cols if c not in desired_order
+    ]
+    review_df = review_df[ordered_cols]
 
     review_df = st.data_editor(
         review_df,
@@ -376,7 +400,7 @@ Fill in the text fields where applicable.
             ),
             "Event Location": st.column_config.TextColumn(
                 "Event Location (for Category 16 items)",
-                help="Where the event took place, e.g., 'Honolulu, HI'.",
+                help="Where the event took place, e.g., 'Honolulu, HI').",
             ),
             "Event Purpose": st.column_config.TextColumn(
                 "Event Purpose (for Category 16 items)",
@@ -601,4 +625,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.success("Processing complete. Review any manually-classified rows (especially 7, 9, 15, 16, 23, those marked 'Needs Further Investigation', and potential sponsorships), then download the monthly report and supporting CSVs.")
+st.success("Processing complete. Use the Manual Reconciliation section to resolve any remaining items, then download the monthly report and supporting CSVs.")
