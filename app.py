@@ -1,10 +1,6 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
 
-# -----------------------------
-# BASIC CONFIG
-# -----------------------------
 st.set_page_config(page_title="FAOA 501(c)(3) Treasurer Tool", layout="wide")
 
 st.title("FAOA Bank Statement → IRS Category Classifier")
@@ -16,22 +12,44 @@ Upload a **CSV or Excel** bank statement and this tool will:
 2. Produce a summary of totals by IRS category  
 3. Let you download the categorized data and the summary as CSV files  
 
-**Assumptions for v1:**
-- Your export has at least `Description` and `Amount` columns  
-- Deposits are positive; withdrawals are negative in `Amount`  
-- No bank data is stored in this app – everything is processed in memory only
+**Assumptions for this tool:**
+- Your file has at least two columns:  
+  - `Description` – text description of the transaction  
+  - `Amount` – deposits positive, withdrawals negative  
+- No bank data is stored by this app – everything is processed in memory only.
+""")
+
+with st.expander("If your statement is a PDF – how to convert it to CSV with an AI assistant"):
+    st.markdown("""
+If your bank only gives you a **PDF statement**, do this before using this tool:
+
+1. Open an AI assistant (e.g., ChatGPT) that supports **file upload**.  
+2. Upload your **PDF bank statement**.  
+3. Use a prompt like this:
+
+> **Sample prompt:**  
+> *“You are a data assistant. I will upload a PDF bank statement.  
+> Extract all **transaction rows** and convert them into a **CSV table** with the exact headers:  
+> `Date,Description,Amount`.  
+> - One row per transaction.  
+> - `Amount` must be numeric (no `$` or commas).  
+> - Deposits should be **positive** numbers, withdrawals or debits should be **negative** numbers.  
+> - Do **not** include beginning/ending balances, running balance columns, account numbers, page headers, or footers.  
+> Return only raw CSV text, with the first line as the header row, no extra commentary or markdown.”*
+
+4. Copy the CSV text the AI gives you into a `.csv` file, or download it if the AI offers a file.  
+5. Upload that CSV file into this FAOA tool.
 """)
 
 # -----------------------------
-# (Optional) SIMPLE PASSWORD GATE
+# SIMPLE PASSWORD GATE (optional)
 # -----------------------------
-# If you set APP_PASSWORD in Streamlit "Secrets", this will enforce it.
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
 
 if APP_PASSWORD:
     pwd = st.text_input("Enter FAOA treasurer password", type="password")
     if pwd != APP_PASSWORD:
-        st.stop()  # Do not proceed until password is correct
+        st.stop()
 
 # -----------------------------
 # IRS CATEGORY LABELS
@@ -53,14 +71,15 @@ CATEGORY_LABELS = {
     "23": "23 - Other expenses not classified above",
 }
 
-
 # -----------------------------
 # CORE CLASSIFICATION LOGIC
 # -----------------------------
-def categorize_row(row: pd.Series) -> str:
+def classify_row(row: pd.Series) -> tuple[str, bool]:
     """
-    Apply FAOA -> IRS classification rules based on transaction description and amount.
-    This is v1 and can be refined over time as you tighten your bookkeeping rules.
+    Return (IRS category label, needs_review).
+
+    needs_review = True  => we fell back to 'other' and want treasurer input.
+    needs_review = False => rule-based, no treasurer action required.
     """
     desc = str(row.get("Description", "")).lower()
     amount_raw = row.get("Amount", 0)
@@ -70,78 +89,96 @@ def categorize_row(row: pd.Series) -> str:
     except Exception:
         amount = 0.0
 
-    # ---- REVENUE RULES ----
+    # ---- HARD IGNORE: balance / non-transaction rows ----
+    if "balance" in desc and not any(
+        kw in desc for kw in ["deposit", "withdrawal", "paid from", "pos debit", "ach"]
+    ):
+        return "IGNORE", False
 
-    # Membership via Affinipay & Stripe
-    if "affinipay" in desc:
-        return CATEGORY_LABELS["2"]
+    # -----------------
+    # REVENUE RULES
+    # -----------------
 
-    if "stripe" in desc and amount > 0:
-        # Journal subscription vs membership threshold
-        if abs(amount) < 20:
-            # Treat as exempt-purpose receipts (journal subs)
-            return CATEGORY_LABELS["9"]
+    # Membership via Affinipay
+    if "affinipay" in desc and amount > 0:
+        return CATEGORY_LABELS["2"], False
+
+    # Stripe transfers – journal vs membership (cutoff = $9)
+    if "stripe transfer" in desc and amount > 0:
+        if abs(amount) < 9:  # < $9 → Category 9, >= $9 → Category 2
+            return CATEGORY_LABELS["9"], False
         else:
-            # Membership dues
-            return CATEGORY_LABELS["2"]
+            return CATEGORY_LABELS["2"], False
 
-    # Corporate sponsorships / donations (wire or check)
+    # Corporate sponsorships / donations
     if any(x in desc for x in ["sponsorship", "sponsor", "corp sponsor", "donation", "donor"]):
-        return CATEGORY_LABELS["1"]
+        return CATEGORY_LABELS["1"], False
 
     # Interest income
     if "interest" in desc and amount > 0:
-        return CATEGORY_LABELS["3"]
+        return CATEGORY_LABELS["3"], False
 
-    # ---- EXPENSE RULES ----
+    # -----------------
+    # EXPENSE RULES
+    # -----------------
 
-    # SaaS / tech tools (WildApricot, ConvertKit, Squarespace, Network Solutions, Apple.com, etc.)
-    if any(x in desc for x in ["wildapricot", "convertkit", "kit.com", "squarespace",
-                               "networksolutio", "apple.com"]):
-        # Treat as other operating expenses
-        return CATEGORY_LABELS["23"]
-
-    # Fundraising materials / printing / gala venue / banquet
-    if any(x in desc for x in ["minuteman press", "upprinting", "printing",
-                               "fundraising", "gala", "banquet", "ballroom"]):
-        return CATEGORY_LABELS["14"]
-
-    # Awards donated out to PME institutions (Maxter Group, Awards Recognition, etc.)
-    if any(x in desc for x in ["awards recognition", "maxter group"]):
-        return CATEGORY_LABELS["15"]
-
-    # Chapter events & member-focused events / withdrawals
+    # SaaS / tech subscriptions (WildApricot, Airtable, Squarespace, etc.)
     if any(x in desc for x in [
-        "chapter event",
-        "cash withdrawal",
-        "atm withdrawal",
-        "chapter dinner",
-        "chapter lunch",
-        "chapter meeting"
+        "wild apricot", "wildapricot",
+        "convertkit", "kit.com",
+        "squarespace",
+        "airtable.com", "airtable",
+        "networksolutio", "network solutions",
+        "apple.com"
     ]):
-        return CATEGORY_LABELS["16"]
+        return CATEGORY_LABELS["23"], False  # known SaaS / operating expense
 
-    # Professional fees – legal, accounting, consulting
-    if any(x in desc for x in ["cooley", "legal", "attorney", "law firm",
-                               "cpa", "accounting", "bookkeeping", "consulting fee"]):
-        return CATEGORY_LABELS["22"]
+    # Fundraising materials / gala / printing
+    if any(x in desc for x in [
+        "minuteman press", "upprinting", "printing",
+        "fundraising", "gala", "banquet", "ballroom"
+    ]):
+        return CATEGORY_LABELS["14"], False
 
-    # Payment processor / merchant fees (credit card processing, gateways)
-    if any(x in desc for x in ["authnet gateway", "bkcrd fees", "merchant fee",
-                               "cardconnect", "processing fee"]):
-        return CATEGORY_LABELS["23"]
+    # Awards donated to PME (Maxter Group, Awards Recognition)
+    if any(x in desc for x in ["awards recognition", "maxter group"]):
+        return CATEGORY_LABELS["15"], False
 
-    # Interest expense (credit card or loan interest)
+    # Chapter events / member-focused events
+    if any(x in desc for x in [
+        "chapter event", "chapter dinner", "chapter lunch", "chapter meeting",
+        "paypal *sam", "paypal sam"
+    ]):
+        return CATEGORY_LABELS["16"], False
+
+    # Professional fees – contractors, Upwork, legal, accounting
+    if any(x in desc for x in [
+        "cooley", "legal", "attorney", "law firm",
+        "cpa", "accounting", "bookkeeping",
+        "consulting fee", "upwork"
+    ]):
+        return CATEGORY_LABELS["22"], False
+
+    # Payment processor / merchant fees
+    if any(x in desc for x in [
+        "authnet gateway", "bkcrd fees", "merchant fee",
+        "cardconnect", "processing fee"
+    ]):
+        return CATEGORY_LABELS["23"], False
+
+    # Interest expense
     if "interest" in desc and amount < 0:
-        return CATEGORY_LABELS["19"]
+        return CATEGORY_LABELS["19"], False
 
-    # ---- DEFAULTS ----
+    # -----------------
+    # FALLBACKS → TREASURER REVIEW REQUIRED
+    # -----------------
     if amount > 0:
-        # Unmatched deposits → other revenue (you can tighten later)
-        return CATEGORY_LABELS["7"]
+        # Unmatched deposits → other revenue (needs review)
+        return CATEGORY_LABELS["7"], True
     else:
-        # Unmatched withdrawals → other expenses
-        return CATEGORY_LABELS["23"]
+        # Unmatched withdrawals → other expenses (needs review)
+        return CATEGORY_LABELS["23"], True
 
 
 # -----------------------------
@@ -165,6 +202,11 @@ except Exception as e:
     st.error(f"Could not read file: {e}")
     st.stop()
 
+# Clean up obvious junk rows
+if "Description" in df.columns:
+    df = df.dropna(subset=["Description"])
+    df = df[~df["Description"].str.contains("balance", case=False, na=False)]
+
 st.subheader("Raw data preview")
 st.dataframe(df.head())
 
@@ -184,9 +226,51 @@ if missing:
 # -----------------------------
 # APPLY CLASSIFICATION
 # -----------------------------
-df["IRS Category"] = df.apply(categorize_row, axis=1)
+result = df.apply(classify_row, axis=1, result_type="expand")
+result.columns = ["IRS Category", "Needs Review"]
+df[["IRS Category", "Needs Review"]] = result
 
-st.subheader("Categorized transactions (preview)")
+# Drop ignored rows (balances, etc.)
+df = df[df["IRS Category"] != "IGNORE"]
+
+st.subheader("Categorized transactions (initial pass)")
+st.dataframe(df.head(50))
+
+# -----------------------------
+# MANUAL REVIEW FOR UNCLASSIFIED ITEMS
+# -----------------------------
+review_df = df[df["Needs Review"]]
+
+if not review_df.empty:
+    st.subheader("Transactions requiring manual classification")
+
+    st.write(
+        "These did not match any automatic rule. "
+        "Use the dropdown to choose the correct IRS category for each transaction."
+    )
+
+    cat_options = list(CATEGORY_LABELS.values())
+
+    review_df = st.data_editor(
+        review_df,
+        column_config={
+            "IRS Category": st.column_config.SelectboxColumn(
+                "IRS Category",
+                options=cat_options,
+            )
+        },
+        num_rows="fixed",
+        use_container_width=True,
+        key="review_editor",
+    )
+
+    # Update main df with treasurer's selections
+    df.update(review_df)
+
+# After manual edits, we no longer care about Needs Review flag
+df = df.drop(columns=["Needs Review"])
+
+st.subheader("Final categorized transactions")
 st.dataframe(df.head(50))
 
 # -----------------------------
@@ -226,4 +310,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.success("Processing complete. You can now download the categorized data and totals.")
+st.success("Processing complete. Review any manually-classified rows, then download the categorized data and totals.")
