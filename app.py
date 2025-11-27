@@ -541,9 +541,9 @@ def build_text_report(
     ...
     Expense Categories
     ...
-    Itemized Revenue
+    Itemized Revenue (by IRS category)
     ...
-    Itemized Expenses
+    Itemized Expenses (by IRS category)
     ...
     Needs Further Investigation total
     """
@@ -588,91 +588,135 @@ def build_text_report(
         out.write("  (No expenses recorded for this period.)\n")
     out.write("\n")
 
-    # --- Itemized Revenue ---
+    # local numeric series
+    amount_series_local = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+
+    # ------------------------
+    # ITEMIZED REVENUE (BY IRS CATEGORY)
+    # ------------------------
     out.write("ITEMIZED REVENUE\n")
 
-    # Itemized revenue by Itemization Label (primarily categories 7 and 9)
-    rev_item_mask = (amount_series > 0) & (df["Itemization Label"] != "")
-    rev_items = df[rev_item_mask].copy()
+    any_itemized_rev = False
+    for code, label, _ in summary_rows:
+        if code not in REVENUE_CODES:
+            continue
 
-    if rev_items.empty:
-        out.write("  (No itemized revenue entries.)\n")
-    else:
-        grouped = (
-            rev_items.groupby("Itemization Label")["Amount"]
-            .sum()
-            .reset_index()
-            .sort_values("Itemization Label")
-        )
-        for _, r in grouped.iterrows():
-            out.write(f"  {r['Itemization Label']}: {float(r['Amount']):,.2f}\n")
+        cat_df = df[df["IRS Category"].str.startswith(f"{code} ")]
+        if cat_df.empty:
+            continue
 
-    # Itemized revenue by Sponsor Name (for Category 1 sponsorships/donations)
-    sponsor_mask = (amount_series > 0) & (df["Sponsor Name"] != "")
-    sponsor_items = df[sponsor_mask].copy()
-    if not sponsor_items.empty:
-        out.write("\n  Sponsorship / Donor Detail:\n")
-        grouped_s = (
-            sponsor_items.groupby("Sponsor Name")["Amount"]
-            .sum()
-            .reset_index()
-            .sort_values("Sponsor Name")
-        )
-        for _, r in grouped_s.iterrows():
-            out.write(f"    {r['Sponsor Name']}: {float(r['Amount']):,.2f}\n")
+        # Only bother if there is some sort of breakdown info
+        has_item_labels = (cat_df["Itemization Label"] != "").any()
+        has_sponsors = (cat_df["Sponsor Name"] != "").any()
 
-    out.write("\n")
+        if not (has_item_labels or has_sponsors):
+            # No granular breakdown; skip detailed listing
+            continue
 
-    # --- Itemized Expenses ---
-    out.write("ITEMIZED EXPENSES\n")
+        any_itemized_rev = True
+        out.write(f"  Category {code} – {label}:\n")
 
-    # Category 16 – Disbursements to/for members: list individual events
-    cat16 = df[df["IRS Category"].str.startswith("16 ")]
-    if not cat16.empty:
-        out.write("  Category 16 – Disbursements to/for members (individual events):\n")
-        out.write("    Date | Event | Location | Purpose | Amount\n")
-        for _, r in cat16.iterrows():
-            date_val = str(r.get("Date", "") or "")
-            evt = str(r.get("Member/Event Label", "") or "")
-            loc = str(r.get("Event Location", "") or "")
-            purp = str(r.get("Event Purpose", "") or "")
-            amt = float(r["Amount"])
-            out.write(
-                f"    {date_val} | {evt} | {loc} | {purp} | {amt:,.2f}\n"
+        if code == "1":
+            # Sponsorship / donor detail by Sponsor Name
+            sponsor_items = cat_df[cat_df["Sponsor Name"] != ""]
+            if sponsor_items.empty:
+                out.write("    (No sponsor names recorded.)\n")
+            else:
+                grouped_s = (
+                    sponsor_items.groupby("Sponsor Name")["Amount"]
+                    .sum()
+                    .reset_index()
+                    .sort_values("Sponsor Name")
+                )
+                for _, r in grouped_s.iterrows():
+                    out.write(f"    {r['Sponsor Name']}: {float(r['Amount']):,.2f}\n")
+        else:
+            tmp = cat_df.copy()
+            tmp["Itemization Label"] = tmp["Itemization Label"].replace(
+                "", "UNLABELED"
+            ).fillna("UNLABELED")
+            grouped = (
+                tmp.groupby("Itemization Label")["Amount"]
+                .sum()
+                .reset_index()
+                .sort_values("Itemization Label")
             )
+            for _, r in grouped.iterrows():
+                out.write(f"    {r['Itemization Label']}: {float(r['Amount']):,.2f}\n")
+
         out.write("\n")
 
-    # Other expense categories with itemization labels (15, 23, etc.)
-    exp_item_mask = (amount_series < 0) & (df["Itemization Label"] != "") & (
-        ~df["IRS Category"].str.startswith("16 ")
-    )
-    exp_items = df[exp_item_mask].copy()
+    if not any_itemized_rev:
+        out.write("  (No itemized revenue entries.)\n\n")
 
-    if exp_items.empty and cat16.empty:
-        out.write("  (No itemized expense entries.)\n")
-    elif not exp_items.empty:
-        out.write("  Consolidated itemization by type (categories 15, 23, etc.):\n")
-        grouped_e = (
-            exp_items.groupby("Itemization Label")["Amount"]
-            .sum()
-            .reset_index()
-            .sort_values("Itemization Label")
-        )
-        for _, r in grouped_e.iterrows():
-            out.write(f"    {r['Itemization Label']}: {float(r['Amount']):,.2f}\n")
+    # ------------------------
+    # ITEMIZED EXPENSES (BY IRS CATEGORY)
+    # ------------------------
+    out.write("ITEMIZED EXPENSES\n")
 
-    out.write("\n")
+    any_itemized_exp = False
+    for code, label, _ in summary_rows:
+        if code not in EXPENSE_CODES:
+            continue
 
-    # --- Needs Further Investigation total ---
+        cat_df = df[df["IRS Category"].str.startswith(f"{code} ")]
+        if cat_df.empty:
+            continue
+
+        # Category 16 – list individual events
+        if code == "16":
+            if cat_df.empty:
+                continue
+            any_itemized_exp = True
+            out.write(f"  Category 16 – {label} (individual events):\n")
+            out.write("    Date | Event | Location | Purpose | Amount\n")
+            for _, r in cat_df.iterrows():
+                date_val = str(r.get("Date", "") or "")
+                evt = str(r.get("Member/Event Label", "") or "")
+                loc = str(r.get("Event Location", "") or "")
+                purp = str(r.get("Event Purpose", "") or "")
+                amt = float(r["Amount"])
+                out.write(
+                    f"    {date_val} | {evt} | {loc} | {purp} | {amt:,.2f}\n"
+                )
+            out.write("\n")
+        else:
+            # Other expense categories – consolidate by Itemization Label when present
+            if not (cat_df["Itemization Label"] != "").any():
+                # If no labels at all, skip detailed listing for this category
+                continue
+
+            any_itemized_exp = True
+            out.write(f"  Category {code} – {label} (consolidated by type):\n")
+            tmp = cat_df.copy()
+            tmp["Itemization Label"] = tmp["Itemization Label"].replace(
+                "", "UNLABELED"
+            ).fillna("UNLABELED")
+            grouped_e = (
+                tmp.groupby("Itemization Label")["Amount"]
+                .sum()
+                .reset_index()
+                .sort_values("Itemization Label")
+            )
+            for _, r in grouped_e.iterrows():
+                out.write(f"    {r['Itemization Label']}: {float(r['Amount']):,.2f}\n")
+            out.write("\n")
+
+    if not any_itemized_exp:
+        out.write("  (No itemized expense entries.)\n\n")
+
+    # ------------------------
+    # NEEDS FURTHER INVESTIGATION
+    # ------------------------
     nfi_mask = df["Needs Further Investigation"] == True
     nfi_total = df.loc[nfi_mask, "Amount"].sum()
-    nfi_count = nfi_mask.sum()
+    nfi_count = int(nfi_mask.sum())
 
     out.write("NEEDS FURTHER INVESTIGATION (Treasurer Flagged)\n")
     if nfi_count == 0:
         out.write("  (None flagged this period.)\n")
     else:
-        out.write(f"  Count of flagged transactions: {int(nfi_count)}\n")
+        out.write(f"  Count of flagged transactions: {nfi_count}\n")
         out.write(f"  Net total of flagged amounts: {nfi_total:,.2f}\n")
 
     out.write("\n")
