@@ -109,6 +109,9 @@ CATEGORY_LABELS = {
     "23": "23 - Other expenses not classified above",
 }
 
+REVENUE_CODES = {"1", "2", "3", "4", "6", "7", "9"}
+EXPENSE_CODES = {"14", "15", "16", "18", "19", "22", "23"}
+
 # Threshold to treat a non-membership deposit as a likely sponsorship
 LARGE_SPONSOR_THRESHOLD = 500.0  # adjust if you want a different cutoff
 
@@ -473,7 +476,7 @@ st.subheader("Totals by IRS category")
 st.dataframe(summary)
 
 # -----------------------------
-# EXPORTS
+# EXPORTS – MACHINE CSV + TEXT REPORT
 # -----------------------------
 def build_monthly_activity_csv(df: pd.DataFrame) -> bytes:
     """
@@ -523,108 +526,166 @@ def build_monthly_activity_csv(df: pd.DataFrame) -> bytes:
     return out.to_csv(index=False).encode("utf-8")
 
 
-def build_full_export_with_itemization(df: pd.DataFrame) -> bytes:
+def build_text_report(
+    df: pd.DataFrame,
+    summary: pd.DataFrame,
+    month_name: str,
+    year_val: int,
+) -> bytes:
     """
-    Human/IRS-style CSV:
-    1) Full transaction table
-    2) B. ITEMIZED SECTIONS (text sections) for 7, 9, 15, 16, 23.
-    3) Separate subsection for Category 23 items flagged as 'Needs Further Investigation'.
-    Not intended for automated import; this is for documentation/records.
+    Human-readable monthly report as plain text:
+
+    “[Month/Year] Foreign Area Officer Association Financial Report”
+
+    Revenue Categories
+    ...
+    Expense Categories
+    ...
+    Itemized Revenue
+    ...
+    Itemized Expenses
+    ...
+    Needs Further Investigation total
     """
-    output = io.StringIO()
+    out = io.StringIO()
 
-    df.to_csv(output, index=False)
+    out.write(f"{month_name} {year_val} Foreign Area Officer Association Financial Report\n")
+    out.write("Foreign Area Officer Association (FAOA)\n")
+    out.write("-" * 72 + "\n\n")
 
-    output.write("\n\nB. ITEMIZED SECTIONS (MUST APPEAR BELOW THE TABLE)\n")
+    # --- Split summary into revenue vs expense ---
+    def split_code_label(cat: str):
+        parts = cat.split(" ", 1)
+        code = parts[0]
+        label = parts[1].lstrip("- ") if len(parts) > 1 else ""
+        return code, label
 
-    # Helper to write consolidated itemization section
-    def write_consolidated_section(title: str, cat_prefix: str):
-        sub = df[df["IRS Category"].str.startswith(cat_prefix)]
-        if sub.empty:
-            return
-        output.write(f"\n{title}\n")
-        tmp = sub.copy()
-        tmp["Itemization Label"] = tmp["Itemization Label"].replace("", "UNLABELED").fillna("UNLABELED")
+    summary_rows = []
+    for _, row in summary.iterrows():
+        code, label = split_code_label(row["IRS Category"])
+        amt = float(row["Amount"])
+        summary_rows.append((code, label, amt))
+
+    # Revenue categories
+    out.write("REVENUE CATEGORIES\n")
+    has_rev = False
+    for code, label, amt in summary_rows:
+        if code in REVENUE_CODES and abs(amt) > 0.0001:
+            has_rev = True
+            out.write(f"  {code} - {label}: {amt:,.2f}\n")
+    if not has_rev:
+        out.write("  (No revenue recorded for this period.)\n")
+    out.write("\n")
+
+    # Expense categories
+    out.write("EXPENSE CATEGORIES\n")
+    has_exp = False
+    for code, label, amt in summary_rows:
+        if code in EXPENSE_CODES and abs(amt) > 0.0001:
+            has_exp = True
+            out.write(f"  {code} - {label}: {amt:,.2f}\n")
+    if not has_exp:
+        out.write("  (No expenses recorded for this period.)\n")
+    out.write("\n")
+
+    # --- Itemized Revenue ---
+    out.write("ITEMIZED REVENUE\n")
+
+    # Itemized revenue by Itemization Label (primarily categories 7 and 9)
+    rev_item_mask = (amount_series > 0) & (df["Itemization Label"] != "")
+    rev_items = df[rev_item_mask].copy()
+
+    if rev_items.empty:
+        out.write("  (No itemized revenue entries.)\n")
+    else:
         grouped = (
-            tmp.groupby("Itemization Label")["Amount"]
+            rev_items.groupby("Itemization Label")["Amount"]
             .sum()
             .reset_index()
             .sort_values("Itemization Label")
         )
-        output.write("Itemization Label,Total Amount\n")
         for _, r in grouped.iterrows():
-            output.write(f"{r['Itemization Label']},{r['Amount']}\n")
+            out.write(f"  {r['Itemization Label']}: {float(r['Amount']):,.2f}\n")
 
-    # (7) OTHER REVENUE – CONSOLIDATED ITEMIZATION
-    write_consolidated_section(
-        "(7) OTHER REVENUE – CONSOLIDATED ITEMIZATION (one summarized line per type)",
-        "7 "
-    )
+    # Itemized revenue by Sponsor Name (for Category 1 sponsorships/donations)
+    sponsor_mask = (amount_series > 0) & (df["Sponsor Name"] != "")
+    sponsor_items = df[sponsor_mask].copy()
+    if not sponsor_items.empty:
+        out.write("\n  Sponsorship / Donor Detail:\n")
+        grouped_s = (
+            sponsor_items.groupby("Sponsor Name")["Amount"]
+            .sum()
+            .reset_index()
+            .sort_values("Sponsor Name")
+        )
+        for _, r in grouped_s.iterrows():
+            out.write(f"    {r['Sponsor Name']}: {float(r['Amount']):,.2f}\n")
 
-    # (9) GROSS RECEIPTS FROM EXEMPT PURPOSE – CONSOLIDATED ITEMIZATION
-    write_consolidated_section(
-        "(9) GROSS RECEIPTS FROM EXEMPT PURPOSE – CONSOLIDATED ITEMIZATION (one summarized line per program service revenue source)",
-        "9 "
-    )
+    out.write("\n")
 
-    # (15) CONTRIBUTIONS/GIFTS/GRANTS PAID OUT – CONSOLIDATED ITEMIZATION
-    write_consolidated_section(
-        "(15) CONTRIBUTIONS/GIFTS/GRANTS PAID OUT – CONSOLIDATED ITEMIZATION (one summarized line per vendor/type)",
-        "15 "
-    )
+    # --- Itemized Expenses ---
+    out.write("ITEMIZED EXPENSES\n")
 
-    # (16) DISBURSEMENTS TO/FOR MEMBERS – INDIVIDUAL EVENTS
+    # Category 16 – Disbursements to/for members: list individual events
     cat16 = df[df["IRS Category"].str.startswith("16 ")]
     if not cat16.empty:
-        output.write("\n(16) DISBURSEMENTS TO/FOR MEMBERS – INDIVIDUAL EVENTS (each event must list Date, Location, Purpose, Amount)\n")
-        output.write("Date,Member/Event Label,Event Location,Event Purpose,Amount\n")
+        out.write("  Category 16 – Disbursements to/for members (individual events):\n")
+        out.write("    Date | Event | Location | Purpose | Amount\n")
         for _, r in cat16.iterrows():
-            date_val = r["Date"] if pd.notna(r.get("Date", "")) else ""
-            output.write(
-                f"{date_val},"
-                f"{r.get('Member/Event Label','')},"
-                f"{r.get('Event Location','')},"
-                f"{r.get('Event Purpose','')},"
-                f"{r['Amount']}\n"
+            date_val = str(r.get("Date", "") or "")
+            evt = str(r.get("Member/Event Label", "") or "")
+            loc = str(r.get("Event Location", "") or "")
+            purp = str(r.get("Event Purpose", "") or "")
+            amt = float(r["Amount"])
+            out.write(
+                f"    {date_val} | {evt} | {loc} | {purp} | {amt:,.2f}\n"
             )
+        out.write("\n")
 
-    # (23) OTHER EXPENSES NOT CLASSIFIED ABOVE – CONSOLIDATED ITEMIZATION
-    write_consolidated_section(
-        "(23) OTHER EXPENSES NOT CLASSIFIED ABOVE – CONSOLIDATED ITEMIZATION (one summarized line per type)",
-        "23 "
+    # Other expense categories with itemization labels (15, 23, etc.)
+    exp_item_mask = (amount_series < 0) & (df["Itemization Label"] != "") & (
+        ~df["IRS Category"].str.startswith("16 ")
     )
+    exp_items = df[exp_item_mask].copy()
 
-    # (23-FI) CATEGORY 23 ITEMS MARKED "NEEDS FURTHER INVESTIGATION"
-    flag23 = df[
-        (df["IRS Category"].str.startswith("23 ")) &
-        (df["Needs Further Investigation"] == True)
-    ]
-    if not flag23.empty:
-        output.write(
-            "\n(23-FI) CATEGORY 23 ITEMS MARKED 'NEEDS FURTHER INVESTIGATION' "
-            "(internal review – not a separate IRS category)\n"
+    if exp_items.empty and cat16.empty:
+        out.write("  (No itemized expense entries.)\n")
+    elif not exp_items.empty:
+        out.write("  Consolidated itemization by type (categories 15, 23, etc.):\n")
+        grouped_e = (
+            exp_items.groupby("Itemization Label")["Amount"]
+            .sum()
+            .reset_index()
+            .sort_values("Itemization Label")
         )
-        output.write("Date,Description,Amount,Itemization Label\n")
-        for _, r in flag23.iterrows():
-            date_val = r["Date"] if pd.notna(r.get("Date", "")) else ""
-            output.write(
-                f"{date_val},"
-                f"{str(r.get('Description','')).replace(',', ' ')},"
-                f"{r['Amount']},"
-                f"{str(r.get('Itemization Label','')).replace(',', ' ')}\n"
-            )
+        for _, r in grouped_e.iterrows():
+            out.write(f"    {r['Itemization Label']}: {float(r['Amount']):,.2f}\n")
 
-    return output.getvalue().encode("utf-8")
+    out.write("\n")
+
+    # --- Needs Further Investigation total ---
+    nfi_mask = df["Needs Further Investigation"] == True
+    nfi_total = df.loc[nfi_mask, "Amount"].sum()
+    nfi_count = nfi_mask.sum()
+
+    out.write("NEEDS FURTHER INVESTIGATION (Treasurer Flagged)\n")
+    if nfi_count == 0:
+        out.write("  (None flagged this period.)\n")
+    else:
+        out.write(f"  Count of flagged transactions: {int(nfi_count)}\n")
+        out.write(f"  Net total of flagged amounts: {nfi_total:,.2f}\n")
+
+    out.write("\n")
+    out.write("End of report.\n")
+
+    return out.getvalue().encode("utf-8")
 
 
-def to_csv_bytes_simple(dataframe: pd.DataFrame) -> bytes:
-    return dataframe.to_csv(index=False).encode("utf-8")
-
-
+# Build exports
 monthly_report_csv = build_monthly_activity_csv(df)
-itemized_export_csv = build_full_export_with_itemization(df)
-summary_csv = to_csv_bytes_simple(summary)
+text_report = build_text_report(df, summary, month_name, int(year))
 
+# Download buttons
 st.download_button(
     label="Download FAOA Monthly Financial Activity Report (machine-readable CSV)",
     data=monthly_report_csv,
@@ -633,17 +694,10 @@ st.download_button(
 )
 
 st.download_button(
-    label="Download categorized transactions CSV with itemized sections (human/IRS-style)",
-    data=itemized_export_csv,
-    file_name=f"FAOA_Monthly_Itemized_Sections_{int(year)}_{month_number:02d}.csv",
-    mime="text/csv",
+    label="Download formatted monthly financial report (text)",
+    data=text_report,
+    file_name=f"FAOA_Financial_Report_{int(year)}_{month_number:02d}.txt",
+    mime="text/plain",
 )
 
-st.download_button(
-    label="Download IRS category totals CSV",
-    data=summary_csv,
-    file_name=f"FAOA_IRS_Category_Totals_{int(year)}_{month_number:02d}.csv",
-    mime="text/csv",
-)
-
-st.success("Processing complete. Use the Manual Reconciliation section to resolve any remaining items, then download the monthly report and supporting CSVs.")
+st.success("Processing complete. Use the Manual Reconciliation section to resolve any remaining items, then download the monthly report and supporting files.")
