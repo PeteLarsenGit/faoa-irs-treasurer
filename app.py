@@ -116,6 +116,36 @@ EXPENSE_CODES = {"14", "15", "16", "18", "19", "22", "23"}
 LARGE_SPONSOR_THRESHOLD = 500.0  # adjust if you want a different cutoff
 
 # -----------------------------
+# KEYWORD GROUPS
+# -----------------------------
+# “Professional fees” bucket: include legal/accounting + ALL SaaS/subscriptions used to run FAOA
+PROFESSIONAL_FEES_KEYWORDS = [
+    # Legal / accounting / consulting
+    "cooley", "legal", "attorney", "law firm",
+    "cpa", "accounting", "bookkeeping",
+    "consulting fee", "upwork",
+
+    # Payment/admin platforms (treated as professional / service fees)
+    "authnet gateway",
+    "affinipay", "affinipayllc",
+
+    # SaaS / web / productivity / membership tools (ALL SaaS -> Category 22 per your rule)
+    "airtable.com", "airtable",
+    "g suite", "gsuite", "google workspace", "google*gsuite",
+    "wild apricot", "wildapricot",
+    "squarespace",
+    "convertkit", "kit.com",
+    "networksolutio", "network solutions",
+    "apple.com",
+]
+
+# Still “Other expenses” (Category 23) examples (NOT SaaS)
+OTHER_EXPENSE_KEYWORDS = [
+    "bkcrd fees", "merchant fee",
+    "cardconnect", "processing fee",
+]
+
+# -----------------------------
 # CORE CLASSIFICATION LOGIC
 # -----------------------------
 def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
@@ -174,27 +204,9 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
     # EXPENSE RULES
     # -----------------
 
-    # Professional fees – contractors, SaaS we treat as professional, legal, accounting, etc.
-    if any(x in desc for x in [
-        "cooley", "legal", "attorney", "law firm",
-        "cpa", "accounting", "bookkeeping",
-        "consulting fee", "upwork",
-        "airtable.com", "airtable",
-        "g suite", "gsuite", "google workspace", "google*gsuite",
-        "wild apricot", "wildapricot",
-        "squarespace",
-        "authnet gateway",
-        "affinipay", "affinipayllc",
-    ]):
+    # Professional fees – legal/accounting/consulting + ALL SaaS/subscriptions/tools
+    if any(x in desc for x in PROFESSIONAL_FEES_KEYWORDS):
         return CATEGORY_LABELS["22"], False, False
-
-    # SaaS / tech subscriptions that are NOT in the explicit professional-fee list above
-    if any(x in desc for x in [
-        "convertkit", "kit.com",
-        "networksolutio", "network solutions",
-        "apple.com"
-    ]):
-        return CATEGORY_LABELS["23"], False, False  # known SaaS / operating expense
 
     # Awards donated to PME (Maxter Group, Awards Recognition)
     if any(x in desc for x in ["awards recognition", "maxter group"]):
@@ -208,11 +220,8 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
     ]):
         return CATEGORY_LABELS["16"], True, False  # Needs Review for 16
 
-    # Payment processor / merchant fees (non-Affinipay/Authnet, which we treated as 22 above)
-    if any(x in desc for x in [
-        "bkcrd fees", "merchant fee",
-        "cardconnect", "processing fee"
-    ]):
+    # Payment processor / merchant fees
+    if any(x in desc for x in OTHER_EXPENSE_KEYWORDS):
         return CATEGORY_LABELS["23"], False, False
 
     # Interest expense
@@ -353,7 +362,7 @@ if not review_df.empty:
 The rows below **must** be reviewed and reconciled:
 
 - **Category 7 – OTHER REVENUE:**  
-  Use **Itemization Label** to group similar types (e.g., `Journal ads`, `Journal subscriptions`, `Misc reimbursements`).  
+  Use **Itemization Label** to group similar types (e.g., `Journal ads`, `Misc reimbursements`).  
 
 - **Category 9 – GROSS RECEIPTS FROM EXEMPT PURPOSE:**  
   Use **Itemization Label** to identify each **program service revenue source** (e.g., `FAOA Journal Sales`, `Bridge Program Fees`).  
@@ -368,7 +377,7 @@ The rows below **must** be reviewed and reconciled:
   - Fill **Event Purpose** (e.g., `Networking & professional development`)  
 
 - **Category 23 – OTHER EXPENSES NOT CLASSIFIED ABOVE:**  
-  Use **Itemization Label** to describe the type (e.g., `Website hosting`, `SaaS – WildApricot`, `Bank fees`).  
+  Use **Itemization Label** to describe the type (e.g., `Bank fees`, `Postage`, `Printing`, `Misc admin expense`).  
   If a transaction **cannot be clearly associated with any known or documented FAOA activity or purpose**,  
   set **Needs Further Investigation** to **True** (Treasurer deems further investigation).
 
@@ -386,7 +395,7 @@ The rows below **must** be reviewed and reconciled:
 
     cat_options = list(CATEGORY_LABELS.values())
 
-    # Reorder columns so IRS Category is 5th and Needs Further Investigation is 6th
+    # Reorder columns so IRS Category is 4th and Needs Further Investigation is 5th
     desired_order = [
         "Date",
         "Description",
@@ -416,7 +425,7 @@ The rows below **must** be reviewed and reconciled:
             ),
             "Itemization Label": st.column_config.TextColumn(
                 "Itemization Label (for 7, 9, 15, 23)",
-                help="Short label for consolidated itemization (e.g., 'Journal ads', 'Grant – NDU', 'Website hosting').",
+                help="Short label for consolidated itemization (e.g., 'Journal ads', 'Grant – NDU', 'Bank fees').",
             ),
             "Member/Event Label": st.column_config.TextColumn(
                 "Member/Event Label (for Category 16 items)",
