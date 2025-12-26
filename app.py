@@ -182,7 +182,7 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
         "airtable.com", "airtable",
         "g suite", "gsuite", "google workspace", "google*gsuite",
         "wild apricot", "wildapricot",
-        "squarespace",
+        "squarespace", "Sqsp*", "Convertkit",
         "authnet gateway",
         "affinipay", "affinipayllc",
     ]):
@@ -368,7 +368,7 @@ The rows below **must** be reviewed and reconciled:
   - Fill **Event Purpose** (e.g., `Networking & professional development`)  
 
 - **Category 23 – OTHER EXPENSES NOT CLASSIFIED ABOVE:**  
-  Use **Itemization Label** to describe the type (e.g., `Website hosting`, `SaaS – WildApricot`, `Bank fees`).  
+  Use **Itemization Label** to describe the type (e.g., `attorney fees`, `Bank fees`).  
   If a transaction **cannot be clearly associated with any known or documented FAOA activity or purpose**,  
   set **Needs Further Investigation** to **True** (Treasurer deems further investigation).
 
