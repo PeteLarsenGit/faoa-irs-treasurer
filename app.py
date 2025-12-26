@@ -116,33 +116,38 @@ EXPENSE_CODES = {"14", "15", "16", "18", "19", "22", "23"}
 LARGE_SPONSOR_THRESHOLD = 500.0  # adjust if you want a different cutoff
 
 # -----------------------------
-# KEYWORD GROUPS
+# KEYWORD SETS
 # -----------------------------
-# “Professional fees” bucket: include legal/accounting + ALL SaaS/subscriptions used to run FAOA
-PROFESSIONAL_FEES_KEYWORDS = [
-    # Legal / accounting / consulting
+# Treat ALL SaaS + web + subscriptions as Professional Fees (22)
+PROFESSIONAL_FEE_KEYWORDS = [
+    # legal / accounting / contractors
     "cooley", "legal", "attorney", "law firm",
     "cpa", "accounting", "bookkeeping",
     "consulting fee", "upwork",
 
-    # Payment/admin platforms (treated as professional / service fees)
+    # payment gateways / org tooling you want in 22
     "authnet gateway",
     "affinipay", "affinipayllc",
 
-    # SaaS / web / productivity / membership tools (ALL SaaS -> Category 22 per your rule)
+    # SaaS / web / subscriptions (move all of these to 22)
     "airtable.com", "airtable",
     "g suite", "gsuite", "google workspace", "google*gsuite",
     "wild apricot", "wildapricot",
-    "squarespace",
-    "convertkit", "kit.com",
+    "squarespace", "squaresp", "sqsp", "sqsp*",
+    "convertkit", "kit.com", "httpskit.com", "kit prev",
     "networksolutio", "network solutions",
     "apple.com",
+    "zoom", "microsoft", "office 365", "o365",
+    "canva",
+    "mailchimp",
+    "wix", "weebly",
 ]
 
-# Still “Other expenses” (Category 23) examples (NOT SaaS)
+# Keywords for Category 23 (non-SaaS miscellaneous operating items)
 OTHER_EXPENSE_KEYWORDS = [
     "bkcrd fees", "merchant fee",
     "cardconnect", "processing fee",
+    "bank fee", "service fee",
 ]
 
 # -----------------------------
@@ -171,7 +176,6 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
 
     # ---- INTERNAL TRANSFERS TO/FROM SAVINGS (IGNORE) ----
     if "transfer" in desc and "savings" in desc:
-        # Internal move between checking and savings; not revenue or expense
         return "IGNORE", False, False
 
     potential_sponsorship = False
@@ -187,13 +191,12 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
     # Stripe transfers – journal vs membership (cutoff = $9)
     if "stripe transfer" in desc and amount > 0:
         if abs(amount) < 9:  # < $9 → Category 9 (journal-type exempt receipts)
-            return CATEGORY_LABELS["9"], False, False  # we'll also auto-label later
+            return CATEGORY_LABELS["9"], False, False
         else:
             return CATEGORY_LABELS["2"], False, False
 
     # Corporate sponsorships / donations (explicitly identifiable)
     if any(x in desc for x in ["sponsorship", "sponsor", "corp sponsor", "donation", "donor"]):
-        # Explicit donations → Category 1, still want sponsor name
         return CATEGORY_LABELS["1"], True, True
 
     # Interest income
@@ -204,8 +207,8 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
     # EXPENSE RULES
     # -----------------
 
-    # Professional fees – legal/accounting/consulting + ALL SaaS/subscriptions/tools
-    if any(x in desc for x in PROFESSIONAL_FEES_KEYWORDS):
+    # Professional fees – includes ALL SaaS/subscriptions per your rule
+    if any(x in desc for x in PROFESSIONAL_FEE_KEYWORDS):
         return CATEGORY_LABELS["22"], False, False
 
     # Awards donated to PME (Maxter Group, Awards Recognition)
@@ -218,9 +221,9 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
         "chapter event", "chapter dinner", "chapter lunch", "chapter meeting",
         "paypal *sam", "paypal sam"
     ]):
-        return CATEGORY_LABELS["16"], True, False  # Needs Review for 16
+        return CATEGORY_LABELS["16"], True, False
 
-    # Payment processor / merchant fees
+    # Payment processor / merchant fees (non-Affinipay/Authnet, which we treated as 22 above)
     if any(x in desc for x in OTHER_EXPENSE_KEYWORDS):
         return CATEGORY_LABELS["23"], False, False
 
@@ -236,10 +239,8 @@ def classify_row(row: pd.Series) -> tuple[str, bool, bool]:
         if amount >= LARGE_SPONSOR_THRESHOLD:
             potential_sponsorship = True
             return CATEGORY_LABELS["1"], True, potential_sponsorship
-        # Smaller unknown revenue
         return CATEGORY_LABELS["7"], True, False
     else:
-        # Unmatched withdrawals → other expenses (needs review; may be flagged for further investigation)
         return CATEGORY_LABELS["23"], True, False
 
 
@@ -328,10 +329,7 @@ journal_mask = (
     & (amount_series.abs() < 9)
 )
 
-# Ensure they are Category 9 (journal-type exempt receipts)
 df.loc[journal_mask, "IRS Category"] = CATEGORY_LABELS["9"]
-
-# Auto-set itemization label if not already set
 df.loc[journal_mask & (df["Itemization Label"] == ""), "Itemization Label"] = "Journal subscriptions"
 
 # -----------------------------
@@ -341,8 +339,6 @@ st.subheader("Categorized transactions (initial pass)")
 st.dataframe(df.head(50))
 
 # Force review for categories that require itemization:
-# 7 (Other revenue), 9 (Gross receipts from exempt purpose),
-# 15 (Contributions paid out), 16 (Disbursements to/for members), 23 (Other expenses)
 df["Needs Review"] = df["Needs Review"] | df["IRS Category"].str.startswith(
     ("7 ", "9 ", "15 ", "16 ", "23 ")
 )
@@ -377,7 +373,7 @@ The rows below **must** be reviewed and reconciled:
   - Fill **Event Purpose** (e.g., `Networking & professional development`)  
 
 - **Category 23 – OTHER EXPENSES NOT CLASSIFIED ABOVE:**  
-  Use **Itemization Label** to describe the type (e.g., `Bank fees`, `Postage`, `Printing`, `Misc admin expense`).  
+  Use **Itemization Label** to describe the type (e.g., `Bank fees`, `Postage`, `Office supplies`, `Misc operating`).  
   If a transaction **cannot be clearly associated with any known or documented FAOA activity or purpose**,  
   set **Needs Further Investigation** to **True** (Treasurer deems further investigation).
 
@@ -395,7 +391,6 @@ The rows below **must** be reviewed and reconciled:
 
     cat_options = list(CATEGORY_LABELS.values())
 
-    # Reorder columns so IRS Category is 4th and Needs Further Investigation is 5th
     desired_order = [
         "Date",
         "Description",
@@ -477,7 +472,6 @@ summary = (
     .sort_values("IRS Category")
 )
 
-# Attach Month / Year to summary (for annual consolidation)
 summary["Month"] = month_number
 summary["Year"] = int(year)
 
@@ -488,21 +482,13 @@ st.dataframe(summary)
 # EXPORTS – MACHINE CSV + TEXT REPORT
 # -----------------------------
 def build_monthly_activity_csv(df: pd.DataFrame) -> bytes:
-    """
-    Machine-readable FAOA Monthly Financial Activity Report:
-    - One row per transaction
-    - Includes Month, Year, IRS Category code & label, and all itemization fields
-    This is what you'll import 1–12 of into the annual consolidation tool.
-    """
     out = df.copy()
 
-    # Split IRS Category into code + label
     out["IRS Category Code"] = out["IRS Category"].str.split(" ", n=1).str[0]
     out["IRS Category Label"] = (
         out["IRS Category"].str.split(" ", n=1).str[1].str.lstrip("- ").fillna("")
     )
 
-    # Ensure consistent column order
     cols_order = [
         "Year",
         "Month",
@@ -520,7 +506,6 @@ def build_monthly_activity_csv(df: pd.DataFrame) -> bytes:
         "Needs Further Investigation",
     ]
 
-    # Ensure all required columns exist
     for c in cols_order:
         if c not in out.columns:
             if c in ["Amount", "Month", "Year"]:
@@ -531,7 +516,6 @@ def build_monthly_activity_csv(df: pd.DataFrame) -> bytes:
                 out[c] = ""
 
     out = out[cols_order]
-
     return out.to_csv(index=False).encode("utf-8")
 
 
@@ -541,28 +525,12 @@ def build_text_report(
     month_name: str,
     year_val: int,
 ) -> bytes:
-    """
-    Human-readable monthly report as plain text:
-
-    “[Month/Year] Foreign Area Officer Association Financial Report”
-
-    Revenue Categories
-    ...
-    Expense Categories
-    ...
-    Itemized Revenue
-    ...
-    Itemized Expenses
-    ...
-    Needs Further Investigation total
-    """
     out = io.StringIO()
 
     out.write(f"{month_name} {year_val} Foreign Area Officer Association Financial Report\n")
     out.write("Foreign Area Officer Association (FAOA)\n")
     out.write("-" * 72 + "\n\n")
 
-    # --- Split summary into revenue vs expense ---
     def split_code_label(cat: str):
         parts = cat.split(" ", 1)
         code = parts[0]
@@ -575,7 +543,6 @@ def build_text_report(
         amt = float(row["Amount"])
         summary_rows.append((code, label, amt))
 
-    # Revenue categories
     out.write("REVENUE CATEGORIES\n")
     has_rev = False
     for code, label, amt in summary_rows:
@@ -586,7 +553,6 @@ def build_text_report(
         out.write("  (No revenue recorded for this period.)\n")
     out.write("\n")
 
-    # Expense categories
     out.write("EXPENSE CATEGORIES\n")
     has_exp = False
     for code, label, amt in summary_rows:
@@ -597,11 +563,9 @@ def build_text_report(
         out.write("  (No expenses recorded for this period.)\n")
     out.write("\n")
 
-    # --- Itemized Revenue ---
     out.write("ITEMIZED REVENUE\n")
-
-    # Itemized revenue by Itemization Label (primarily categories 7 and 9)
-    rev_item_mask = (amount_series > 0) & (df["Itemization Label"] != "")
+    amount_series_local = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+    rev_item_mask = (amount_series_local > 0) & (df["Itemization Label"] != "")
     rev_items = df[rev_item_mask].copy()
 
     if rev_items.empty:
@@ -616,8 +580,7 @@ def build_text_report(
         for _, r in grouped.iterrows():
             out.write(f"  {r['Itemization Label']}: {float(r['Amount']):,.2f}\n")
 
-    # Itemized revenue by Sponsor Name (for Category 1 sponsorships/donations)
-    sponsor_mask = (amount_series > 0) & (df["Sponsor Name"] != "")
+    sponsor_mask = (amount_series_local > 0) & (df["Sponsor Name"] != "")
     sponsor_items = df[sponsor_mask].copy()
     if not sponsor_items.empty:
         out.write("\n  Sponsorship / Donor Detail:\n")
@@ -632,10 +595,7 @@ def build_text_report(
 
     out.write("\n")
 
-    # --- Itemized Expenses ---
     out.write("ITEMIZED EXPENSES\n")
-
-    # Category 16 – Disbursements to/for members: list individual events
     cat16 = df[df["IRS Category"].str.startswith("16 ")]
     if not cat16.empty:
         out.write("  Category 16 – Disbursements to/for members (individual events):\n")
@@ -646,13 +606,10 @@ def build_text_report(
             loc = str(r.get("Event Location", "") or "")
             purp = str(r.get("Event Purpose", "") or "")
             amt = float(r["Amount"])
-            out.write(
-                f"    {date_val} | {evt} | {loc} | {purp} | {amt:,.2f}\n"
-            )
+            out.write(f"    {date_val} | {evt} | {loc} | {purp} | {amt:,.2f}\n")
         out.write("\n")
 
-    # Other expense categories with itemization labels (15, 23, etc.)
-    exp_item_mask = (amount_series < 0) & (df["Itemization Label"] != "") & (
+    exp_item_mask = (amount_series_local < 0) & (df["Itemization Label"] != "") & (
         ~df["IRS Category"].str.startswith("16 ")
     )
     exp_items = df[exp_item_mask].copy()
@@ -672,7 +629,6 @@ def build_text_report(
 
     out.write("\n")
 
-    # --- Needs Further Investigation total ---
     nfi_mask = df["Needs Further Investigation"] == True
     nfi_total = df.loc[nfi_mask, "Amount"].sum()
     nfi_count = nfi_mask.sum()
@@ -684,17 +640,13 @@ def build_text_report(
         out.write(f"  Count of flagged transactions: {int(nfi_count)}\n")
         out.write(f"  Net total of flagged amounts: {nfi_total:,.2f}\n")
 
-    out.write("\n")
-    out.write("End of report.\n")
-
+    out.write("\nEnd of report.\n")
     return out.getvalue().encode("utf-8")
 
 
-# Build exports
 monthly_report_csv = build_monthly_activity_csv(df)
 text_report = build_text_report(df, summary, month_name, int(year))
 
-# Download buttons
 st.download_button(
     label="Download FAOA Monthly Financial Activity Report (machine-readable CSV)",
     data=monthly_report_csv,
@@ -710,3 +662,4 @@ st.download_button(
 )
 
 st.success("Processing complete. Use the Manual Reconciliation section to resolve any remaining items, then download the monthly report and supporting files.")
+
